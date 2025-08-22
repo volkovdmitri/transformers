@@ -1,6 +1,5 @@
 import torch
 from torch.utils.data import Dataset, DataLoader
-from text_utils import Tokenizer
 
 class GPTDataset(Dataset):
     def __init__(self, tokens, max_length, stride, n_tokens=None):
@@ -27,10 +26,3 @@ def create_dataloader(tokens, n_tokens=None, batch_size=8, max_length=4, stride=
     dataset = GPTDataset(tokens, max_length, stride, n_tokens)
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, drop_last=drop_last, num_workers=num_workers)
     return dataloader
-
-
-def create_embedding(vocab_size, output_size, context_size):
-    embedding_layer = torch.nn.Embedding(vocab_size, output_size)
-    pos_embedding_layer = torch.nn.Embedding(context_size, output_size)
-    pos_embeddings = pos_embedding_layer(torch.arange(context_size))
-    return pos_embedding_layer, pos_embeddings

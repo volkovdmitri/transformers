@@ -2,10 +2,9 @@ import torch
 import torch.nn as nn
 import tiktoken
 
-from text_utils import Tokenizer
 from data_preparation import create_dataloader
-from attention import MultiHeadAttention
-    
+from transformer import Transformer, LayerNorm
+
 
 class GPTModel(nn.Module):
     def __init__(self, configs):
@@ -25,74 +24,9 @@ class GPTModel(nn.Module):
         x = self.final_norm.forward(x)
         logits = self.out_head.forward(x)
         return logits
-
-
-class Transformer(nn.Module):
-    def __init__(self, configs):
-        super().__init__()
-        self.mha = MultiHeadAttention(
-            d_in=configs["embedding_size"], 
-            d_out=configs["embedding_size"], 
-            num_heads=configs["num_heads"], 
-            context_length=configs["context_length"], 
-            dropout=configs["dropout_rate"], 
-            qkv_bias=configs["qkv_bias"]
-        )
-        self.ff = FeedForward(configs)
-        self.norm1 = LayerNorm(configs)
-        self.norm2 = LayerNorm(configs) 
-        self.dropout_shortcut = nn.Dropout(configs["dropout_rate"])
-
-    def forward(self, x):
-        shortcut = x
-        x = self.norm1.forward(x)
-        x = self.mha.forward(x)
-        x = self.dropout_shortcut(x) + shortcut
-
-        shortcut = x
-        x = self.norm2.forward(x)
-        x = self.ff.forward(x)
-        x = self.dropout_shortcut(x) + shortcut
-
-        return x
-
-
-class LayerNorm(nn.Module):
-    def __init__(self, configs) :
-        super().__init__()
-        self.eps = 1e-5
-        self.scale = nn.Parameter(torch.ones(configs["embedding_size"]))
-        self.shift = nn.Parameter(torch.zeros(configs["embedding_size"]))
-        
-    def forward(self, x):
-        mean = x.mean(dim=-1, keepdim=True)
-        var = x.var(dim=-1, keepdim=True, unbiased=False)
-        norm_x = (x - mean) / torch.sqrt(var + self.eps)
-        return self.scale * norm_x + self.shift
-
-
-class FeedForward(nn.Module):
-    def __init__(self, configs):
-        super().__init__()
-        self.layers = nn.Sequential(
-            nn.Linear(configs["embedding_size"], 4 * configs["embedding_size"]),
-            GELU(),
-            nn.Linear(4 * configs["embedding_size"], configs["embedding_size"])
-        )
-
-    def forward(self, x):
-        return self.layers(x)
     
 
-class GELU(nn.Module):
-    def __init__(self) :
-        super().__init__()
-    
-    def forward(self, x):
-        return 0.5 * x * (1 + torch.tanh(torch.sqrt(torch.tensor(2.0 / torch.pi)) * (x + 0.044715 * torch.pow(x, 3))))
-
-
-def generate_text_simple(model, tokens, max_new_tokens, context_length):
+def generate_text(model, tokens, max_new_tokens, context_length):
     for _ in range(max_new_tokens):
         tokens_cond = tokens[:, -context_length:]
         with torch.no_grad():
@@ -113,12 +47,78 @@ def text_to_tokens(text, tokenizer):
 def tokens_to_text(tokens, tokenizer):
     return tokenizer.decode(tokens.squeeze(0).tolist())
 
+def calc_loss(input, target, model):
+    out = model.forward(input)
+    loss = torch.nn.functional.cross_entropy(out.flatten(0, 1), target.flatten())
+    return loss
+
+def calc_loss_loader(data_loader, model, num_batches=None):
+    total_loss = 0
+    if len(data_loader) == 0:
+        return float("nan")
+    elif num_batches is None:
+        num_batches = len(data_loader)
+    else:
+        num_batches = min(num_batches, len(data_loader))
+
+    for i, (input, target) in enumerate(data_loader):
+        if i < num_batches:
+            loss = calc_loss(input, target, model)
+            total_loss += loss.item()
+        else:
+            break
+    return total_loss / num_batches
+
+def train_model(model, train_loader, val_loader, optimizer, num_epochs, eval_freq, eval_iter, start_context, tokenizer):
+    train_losses, val_losses, track_tokens_seen = [], [], []
+    tokens_seen, global_step = 0, -1
+
+    for epoch in range(num_epochs):
+        model.train()
+        for input, target in train_loader:
+            optimizer.zero_grad()
+            loss = calc_loss(input, target, model)
+            loss.backward()
+            optimizer.step()
+            tokens_seen += input.numel()
+            global_step += 1
+
+            if global_step % eval_freq == 0:
+                train_loss, val_loss = evaluate_model(model, train_loader, val_loader, eval_iter)
+                train_losses.append(train_loss)
+                val_losses.append(val_loss)
+                track_tokens_seen.append(tokens_seen)
+                print(f"Ep {epoch+1} (Step {global_step:06d}): ",
+                      f"Train loss {train_loss:.3f}, Val loss {val_loss:.3f}")
+            
+        generate_print_sample(model, tokenizer, start_context)
+
+    return train_losses, val_losses, track_tokens_seen
+
+
+def evaluate_model(model, train_loader, val_loader, eval_iter):
+    model.eval()    
+    train_loss = calc_loss_loader(train_loader, model, num_batches=eval_iter)
+    val_loss = calc_loss_loader(val_loader, model, num_batches=eval_iter)
+    model.train()
+    return train_loss, val_loss
+
+def generate_print_sample(model, tokenizer, start_context):
+    model.eval()
+    context_size = model.pos_embedding_layer.weight.shape[0]
+    tokens = text_to_tokens(start_context, tokenizer)
+    with torch.no_grad():
+        out = generate_text(model, tokens, max_new_tokens=50, context_length=context_size)
+        out = tokens_to_text(out, tokenizer)
+        print(out.replace("\n", " "))
+    model.train()
+
 
 if __name__ == "__main__":
 
     configs = {
-        "vocab_size": 50257,
-        "context_length": 4,
+        "vocab_size": 100256,
+        "context_length": 128,
         "embedding_size": 768,
         "num_heads": 12,
         "dropout_rate": 0.1,
@@ -126,16 +126,52 @@ if __name__ == "__main__":
         "qkv_bias": False
     }
     
-    txt = "Hello, I'm a "
+    with open("tolstoy.txt", 'r', encoding="utf-8") as f:
+        txt = f.read()
+    
+    tokenizer = tiktoken.get_encoding("cl100k_base")
+    tokens = tokenizer.encode(txt)
+    tokens = tokens[: int(len(tokens) / 100)]
 
-    tokenizer = tiktoken.get_encoding("gpt2")
-    model = GPTModel(configs)
-    
-    
-    res = generate_text_simple(
-        model=model, 
-        tokens=text_to_tokens(txt, tokenizer), 
-        max_new_tokens=6, 
-        context_length=4
+    train_ratio = 0.9
+    train_tokens = tokens[: int(train_ratio * len(tokens))]
+    val_tokens = tokens[int(train_ratio * len(tokens)): ]
+
+    train_loader = create_dataloader(
+        tokens=train_tokens, 
+        n_tokens=None, 
+        batch_size=2, 
+        max_length=configs["context_length"], 
+        stride=configs["context_length"], 
+        shuffle=True, 
+        drop_last=True, 
+        num_workers=0
     )
-    print(tokens_to_text(res, tokenizer))
+    val_loader = create_dataloader(
+        tokens=val_tokens, 
+        n_tokens=None, 
+        batch_size=2, 
+        max_length=configs["context_length"], 
+        stride=configs["context_length"], 
+        shuffle=False, 
+        drop_last=False, 
+        num_workers=0
+    )
+
+model = GPTModel(configs)
+optimizer = torch.optim.AdamW(model.parameters(), lr=0.0004, weight_decay=0.1)
+num_epochs = 10
+
+print("Number of steps: ", len(train_tokens)/configs["context_length"]/2)
+
+train_losses, val_losses, tokens_seen = train_model(
+    model=model,
+    train_loader=train_loader,
+    val_loader=val_loader,
+    optimizer=optimizer,
+    num_epochs=num_epochs,
+    eval_freq=5,
+    eval_iter=1,
+    start_context="Привет, меня зовут Дима, и я очень хочу знать",
+    tokenizer=tokenizer
+)
