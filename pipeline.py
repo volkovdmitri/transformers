@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import tiktoken
+import re
 
 from data_preparation import create_dataloader
 from transformer import Transformer, LayerNorm
@@ -26,9 +27,18 @@ class GPTModel(nn.Module):
         return logits
     
 
+def left_pad_to_context(tokens, context_length, pad_id=0):
+    B, T = tokens.shape
+    if T >= context_length:
+        return tokens[:, -context_length:], None
+    pad = torch.full((B, context_length - T), pad_id, dtype=tokens.dtype)
+    padded = torch.cat([pad, tokens], dim=1)
+    return padded
+
+
 def generate_text(model, tokens, max_new_tokens, context_length):
     for _ in range(max_new_tokens):
-        tokens_cond = tokens[:, -context_length:]
+        tokens_cond = left_pad_to_context(tokens, context_length)
         with torch.no_grad():
             logits = model.forward(tokens_cond)
     
@@ -40,7 +50,7 @@ def generate_text(model, tokens, max_new_tokens, context_length):
 
 
 def text_to_tokens(text, tokenizer):
-    tokens = tokenizer.encode(txt, allowed_special={'<|endoftext|>'})
+    tokens = tokenizer.encode(text, allowed_special={'<|endoftext|>'})
     tokens_tensor = torch.tensor(tokens).unsqueeze(0)
     return tokens_tensor
 
@@ -117,8 +127,8 @@ def generate_print_sample(model, tokenizer, start_context):
 if __name__ == "__main__":
 
     configs = {
-        "vocab_size": 100256,
-        "context_length": 128,
+        "vocab_size": 50257,
+        "context_length": 256,
         "embedding_size": 768,
         "num_heads": 12,
         "dropout_rate": 0.1,
@@ -126,12 +136,16 @@ if __name__ == "__main__":
         "qkv_bias": False
     }
     
-    with open("tolstoy.txt", 'r', encoding="utf-8") as f:
+    with open("the-verdict.txt", 'r', encoding="utf-8") as f:
         txt = f.read()
-    
-    tokenizer = tiktoken.get_encoding("cl100k_base")
+    preprocessed = re.split(r'([,.?_!"()\']|--|\s)', txt)
+    preprocessed = [item.strip() for item in preprocessed if item.strip()]
+    txt = " ".join(preprocessed)
+    txt = re.sub(r'\s+([,.?!"()\'])', r'\1', txt)
+
+    tokenizer = tiktoken.get_encoding("gpt2")
     tokens = tokenizer.encode(txt)
-    tokens = tokens[: int(len(tokens) / 100)]
+    #tokens = tokens[: int(len(tokens) / 100)]
 
     train_ratio = 0.9
     train_tokens = tokens[: int(train_ratio * len(tokens))]
@@ -162,7 +176,7 @@ model = GPTModel(configs)
 optimizer = torch.optim.AdamW(model.parameters(), lr=0.0004, weight_decay=0.1)
 num_epochs = 10
 
-print("Number of steps: ", len(train_tokens)/configs["context_length"]/2)
+print("Number of steps: ", len(train_tokens)/configs["context_length"]/16)
 
 train_losses, val_losses, tokens_seen = train_model(
     model=model,
@@ -172,6 +186,6 @@ train_losses, val_losses, tokens_seen = train_model(
     num_epochs=num_epochs,
     eval_freq=5,
     eval_iter=1,
-    start_context="Привет, меня зовут Дима, и я очень хочу знать",
+    start_context="Every effort moves you",
     tokenizer=tokenizer
 )
