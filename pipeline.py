@@ -105,6 +105,15 @@ def generate_text_simple(model, tokens, max_new_tokens, context_length):
     return tokens
 
 
+def text_to_tokens(text, tokenizer):
+    tokens = tokenizer.encode(txt, allowed_special={'<|endoftext|>'})
+    tokens_tensor = torch.tensor(tokens).unsqueeze(0)
+    return tokens_tensor
+
+def tokens_to_text(tokens, tokenizer):
+    return tokenizer.decode(tokens.squeeze(0).tolist())
+
+
 if __name__ == "__main__":
 
     configs = {
@@ -120,16 +129,13 @@ if __name__ == "__main__":
     txt = "Hello, I'm a "
 
     tokenizer = tiktoken.get_encoding("gpt2")
-    tokens = tokenizer.encode(txt)
-    tokens_tensor = torch.tensor(tokens).unsqueeze(0)
     model = GPTModel(configs)
     
     
     res = generate_text_simple(
         model=model, 
-        tokens=tokens_tensor, 
+        tokens=text_to_tokens(txt, tokenizer), 
         max_new_tokens=6, 
         context_length=4
     )
-    res = tokenizer.decode(res.squeeze(0).tolist())
-    print(res)
+    print(tokens_to_text(res, tokenizer))
